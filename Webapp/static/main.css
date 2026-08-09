@@ -1,0 +1,11 @@
+body {
+    padding: 0;
+    margin: 0;
+}
+* {
+    box-sizing: border-box;
+}
+.naslov {
+    margin:auto;
+    margin-top: 20px;
+}
