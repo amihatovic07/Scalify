@@ -1,0 +1,329 @@
+{% extends "main.html" %}
+
+{% block content %}
+<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script>
+
+<div class="container mt-4">
+    <h1 class="naslov">Modeling</h1>
+    
+    <div class="explanation">
+        <p>Main measurement unit is nicknamed units since it can be universal for centimeters, meters, feet, etc...</p>
+    </div>
+    <div id="mLista" class="row g-3 mb-4"></div>
+
+    <div id="plotWrapper" style="display: none;">
+        <hr>
+        <h4 id="plotTitle"></h4>
+        <div id="plot" style="width: 100%; height: 650px;"></div>
+        <div id="measurementText" class="fs-5 mt-2"></div>
+    </div>
+</div>
+
+<script>
+// ============ UČITAVANJE CARDOVA ZA SVAKI OBJEKT ============
+async function loadObjectCards() {
+    const res = await fetch('/api/objects');
+    const data = await res.json();
+    const lista = document.getElementById('mLista');
+    lista.innerHTML = '';
+
+    data.objects.forEach(obj => {
+        const col = document.createElement('div');
+        col.className = 'col-md-4';
+        col.innerHTML = `
+            <div class="card h-100">
+                <div class="card-body">
+                    <h5 class="card-title">${obj.name}</h5>
+                    <p class="card-text">
+                        Tip: ${obj.object_type}<br>
+                        Dimenzija: ${obj.dimension}D<br>
+                        Broj točaka: ${obj.points.length}
+                    </p>
+                    <button class="btn btn-primary visualize-btn" data-id="${obj.id}">
+                        Visualize
+                    </button>
+                </div>
+            </div>
+        `;
+        lista.appendChild(col);
+    });
+
+    // gumb za svaku karticu poziva vizualizaciju za taj konkretan objekt
+    document.querySelectorAll('.visualize-btn').forEach(btn => {
+        btn.addEventListener('click', function () {
+            visualizeObject(this.getAttribute('data-id'));
+        });
+    });
+}
+
+loadObjectCards();
+
+// ============ CRTANJE GRAFA ZA ODABRANI OBJEKT ============
+async function visualizeObject(id) {
+    const res = await fetch('/objects/edit/' + id);
+    const obj = await res.json();
+    const points = obj.points;
+
+    const plotWrapper = document.getElementById('plotWrapper');
+    const plotDiv = document.getElementById('plot');
+    document.getElementById('plotTitle').textContent = obj.name;
+    plotWrapper.style.display = 'block';
+
+    if (points.length === 0) {
+        Plotly.purge(plotDiv);
+        document.getElementById('measurementText').textContent = '';
+        plotWrapper.scrollIntoView({ behavior: 'smooth' });
+        return;
+    }
+
+    // ============ GENERIRANJE BRIDOVA ============
+    // Ako su točke pravi kvadar (8 točaka, točno 2 različite vrijednosti po X/Y/Z),
+    // nacrtaj svih 12 bridova kvadra iz min/max granica - neovisno o redoslijedu unosa.
+    // Inače, spoji točke redom kao jednu zatvorenu petlju (radi savršeno za ravne poligone).
+    function buildBoxEdges(pts) {
+        const xs = [...new Set(pts.map(p => p.x))];
+        const ys = [...new Set(pts.map(p => p.y))];
+        const zs = [...new Set(pts.map(p => p.z))];
+        if (pts.length !== 8 || xs.length !== 2 || ys.length !== 2 || zs.length !== 2) {
+            return null; // nije pravi kvadar, koristi fallback petlju
+        }
+        const [x0, x1] = xs;
+        const [y0, y1] = ys;
+        const [z0, z1] = zs;
+        // svih 8 vrhova kvadra
+        const corners = [
+            {x: x0, y: y0, z: z0}, {x: x1, y: y0, z: z0},
+            {x: x1, y: y1, z: z0}, {x: x0, y: y1, z: z0},
+            {x: x0, y: y0, z: z1}, {x: x1, y: y0, z: z1},
+            {x: x1, y: y1, z: z1}, {x: x0, y: y1, z: z1}
+        ];
+        // 12 bridova: 4 donja, 4 gornja, 4 vertikalna
+        const edgePairs = [
+            [0,1],[1,2],[2,3],[3,0], // donja ploha
+            [4,5],[5,6],[6,7],[7,4], // gornja ploha
+            [0,4],[1,5],[2,6],[3,7]  // vertikalni spojevi
+        ];
+        return { corners, edgePairs };
+    }
+
+    // Opći paralelopiped (i nagnut/kos): prvih N/2 točaka = donja ploha (redom oko oboda),
+    // sljedećih N/2 = gornja ploha (isti redoslijed). Vrijedi paralelopiped AKO I SAMO AKO
+    // je vektor pomaka (gornja - donja) ISTI za svaki par - tj. baza je translatirana kao cjelina.
+    function buildPrismEdges(pts) {
+        if (pts.length % 2 !== 0 || pts.length < 6) return null;
+        const half = pts.length / 2;
+        const base = pts.slice(0, half);
+        const top = pts.slice(half);
+
+        // izračunaj vektor pomaka iz prvog para, pa provjeri je li isti za sve ostale
+        const dx = top[0].x - base[0].x;
+        const dy = top[0].y - base[0].y;
+        const dz = top[0].z - base[0].z;
+        const eps = 1e-6;
+
+        for (let i = 1; i < half; i++) {
+            const ddx = top[i].x - base[i].x;
+            const ddy = top[i].y - base[i].y;
+            const ddz = top[i].z - base[i].z;
+            if (Math.abs(ddx - dx) > eps || Math.abs(ddy - dy) > eps || Math.abs(ddz - dz) > eps) {
+                return null; // nije konzistentan pomak - nije prizma/paralelopiped
+            }
+        }
+
+        const edgePairs = [];
+        for (let i = 0; i < half; i++) {
+            edgePairs.push([i, (i + 1) % half]);              // donja ploha (obod)
+            edgePairs.push([half + i, half + ((i + 1) % half)]); // gornja ploha (obod)
+            edgePairs.push([i, half + i]);                      // vertikalni spoj baza <-> vrh
+        }
+        return { corners: pts, edgePairs };
+    }
+
+    // Tetraedar: točno 4 točke u 3D - spoji SVE parove (potpuni graf K4, 6 bridova),
+    // jer svaki vrh tetraedra dodiruje preostala 3 vrha, ne samo susjedne u nizu.
+    function buildTetrahedronEdges(pts) {
+        if (pts.length !== 4) return null;
+        const edgePairs = [
+            [0,1],[0,2],[0,3],
+            [1,2],[1,3],
+            [2,3]
+        ];
+        return { corners: pts, edgePairs };
+    }
+
+    const edgeX = [];
+    const edgeY = [];
+    const edgeZ = [];
+
+    // redoslijed pokušaja: opći paralelopiped -> strogi box -> tetraedar -> fallback petlja
+    const prism = obj.dimension === 3 ? buildPrismEdges(points) : null;
+    const box = (!prism && obj.dimension === 3) ? buildBoxEdges(points) : null;
+    const tetra = (!prism && !box && obj.dimension === 3) ? buildTetrahedronEdges(points) : null;
+
+    if (prism || box || tetra) {
+        const shape = prism || box || tetra;
+        shape.edgePairs.forEach(([i, j]) => {
+            const a = shape.corners[i];
+            const b = shape.corners[j];
+            edgeX.push(a.x, b.x, null);
+            edgeY.push(a.y, b.y, null);
+            edgeZ.push(a.z, b.z, null);
+        });
+    } else {
+        // fallback: spoji svaku točku sa sljedećom, i zadnju natrag na prvu (zatvorena petlja)
+        for (let i = 0; i < points.length; i++) {
+            const curr = points[i];
+            const next = points[(i + 1) % points.length]; // % vraća na 0 nakon zadnje točke
+
+            edgeX.push(curr.x, next.x, null); // null razdvaja segmente linije u Plotlyu
+            edgeY.push(curr.y, next.y, null);
+            if (obj.dimension === 3) {
+                edgeZ.push(curr.z, next.z, null);
+            }
+        }
+    }
+
+    // ============ IZRAČUN POVRŠINE / VOLUMENA ============
+    function subVec(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: (a.z ?? 0) - (b.z ?? 0) }; }
+    function cross(a, b) {
+        return {
+            x: a.y * b.z - a.z * b.y,
+            y: a.z * b.x - a.x * b.z,
+            z: a.x * b.y - a.y * b.x
+        };
+    }
+    function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    function vecLength(a) { return Math.sqrt(dot(a, a)); }
+
+    // površina ravnog poligona u 2D (shoelace formula)
+    function polygonArea2D(pts) {
+        let sum = 0;
+        for (let i = 0; i < pts.length; i++) {
+            const curr = pts[i];
+            const next = pts[(i + 1) % pts.length];
+            sum += curr.x * next.y - next.x * curr.y;
+        }
+        return Math.abs(sum) / 2;
+    }
+
+    // površina ravnog poligona u 3D (zbroj poprečnih produkata - radi za bilo koju ravninu)
+    function polygonArea3D(pts) {
+        if (pts.length < 3) return 0;
+        let normalSum = { x: 0, y: 0, z: 0 };
+        const origin = pts[0];
+        for (let i = 1; i < pts.length - 1; i++) {
+            const v1 = subVec(pts[i], origin);
+            const v2 = subVec(pts[i + 1], origin);
+            const c = cross(v1, v2);
+            normalSum.x += c.x; normalSum.y += c.y; normalSum.z += c.z;
+        }
+        return vecLength(normalSum) / 2;
+    }
+
+    // volumen tetraedra (standardna formula: 1/6 * |mješoviti umnožak triju bridova|)
+    function tetrahedronVolume(pts) {
+        const v1 = subVec(pts[1], pts[0]);
+        const v2 = subVec(pts[2], pts[0]);
+        const v3 = subVec(pts[3], pts[0]);
+        return Math.abs(dot(v1, cross(v2, v3))) / 6;
+    }
+
+    // volumen prizme/paralelopipeda: površina baze * visina (okomita komponenta pomaka na normalu baze)
+    // vrijedi za bilo koju prizmu (i nagnutu) po Cavalierijevom principu
+    function prismVolume(pts) {
+        const half = pts.length / 2;
+        const base = pts.slice(0, half);
+        const translation = subVec(pts[half], pts[0]);
+
+        const v1 = subVec(base[1], base[0]);
+        const v2 = subVec(base[base.length - 1], base[0]);
+        let normal = cross(v1, v2);
+        const normalLen = vecLength(normal);
+        if (normalLen === 0) return null; // degeneriran oblik
+        normal = { x: normal.x / normalLen, y: normal.y / normalLen, z: normal.z / normalLen };
+
+        const baseArea = polygonArea3D(base);
+        const height = Math.abs(dot(translation, normal));
+        return baseArea * height;
+    }
+
+    let measurementLabel = '';
+    if (obj.dimension === 2) {
+        const area = polygonArea2D(points);
+        measurementLabel = `Surface: ${area.toFixed(2)} units²`;
+    } else if (prism || box) {
+        const vol = prismVolume(points);
+        measurementLabel = vol !== null
+            ? `Volume: ${vol.toFixed(2)} units³`
+            : 'Volume: not possible to measure (degenerated shape)';
+    } else if (tetra) {
+        const vol = tetrahedronVolume(points);
+        measurementLabel = `Volume: ${vol.toFixed(2)} units³`;
+    } else {
+        measurementLabel = 'Volume: not possible to measure (unknown shape)';
+    }
+    document.getElementById('measurementText').textContent = measurementLabel;
+
+    const nodeX = points.map(p => p.x);
+    const nodeY = points.map(p => p.y);
+    const nodeZ = points.map(p => p.z);
+    const nodeLabels = points.map((p, i) => 'T' + i);
+
+    if (obj.dimension === 3) {
+        // ============ 3D GRAF ============
+        const edgeTrace = {
+            type: 'scatter3d',
+            mode: 'lines',
+            x: edgeX, y: edgeY, z: edgeZ,
+            line: { color: '#1f77b4', width: 4 },
+            name: 'Bridovi'
+        };
+
+        const nodeTrace = {
+            type: 'scatter3d',
+            mode: 'markers+text',
+            x: nodeX, y: nodeY, z: nodeZ,
+            text: nodeLabels,
+            textposition: 'top center',
+            marker: { size: 5, color: '#d62728' },
+            name: 'Čvorovi'
+        };
+
+        Plotly.newPlot(plotDiv, [edgeTrace, nodeTrace], {
+            scene: {
+                xaxis: { title: 'X' },
+                yaxis: { title: 'Y' },
+                zaxis: { title: 'Z' },
+                aspectmode: 'data'
+            }
+        });
+    } else {
+        // ============ 2D GRAF ============
+        const edgeTrace = {
+            type: 'scatter',
+            mode: 'lines',
+            x: edgeX, y: edgeY,
+            line: { color: '#1f77b4', width: 3 },
+            name: 'Bridovi'
+        };
+
+        const nodeTrace = {
+            type: 'scatter',
+            mode: 'markers+text',
+            x: nodeX, y: nodeY,
+            text: nodeLabels,
+            textposition: 'top center',
+            marker: { size: 10, color: '#d62728' },
+            name: 'Čvorovi'
+        };
+
+        Plotly.newPlot(plotDiv, [edgeTrace, nodeTrace], {
+            xaxis: { title: 'X', scaleanchor: 'y' },
+            yaxis: { title: 'Y' }
+        });
+    }
+
+    plotWrapper.scrollIntoView({ behavior: 'smooth' });
+}
+</script>
+{% endblock %}
