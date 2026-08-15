@@ -5,13 +5,17 @@
 
 <div class="container mt-4">
     <h1 class="naslov">Modeling</h1>
-
+    
+    <div class="explanation">
+        <p>Main measurement unit is nicknamed units since it can be universal for centimeters, meters, feet, etc...</p>
+    </div>
     <div id="mLista" class="row g-3 mb-4"></div>
 
     <div id="plotWrapper" style="display: none;">
         <hr>
         <h4 id="plotTitle"></h4>
         <div id="plot" style="width: 100%; height: 650px;"></div>
+        <div id="measurementText" class="fs-5 mt-2"></div>
     </div>
 </div>
 
@@ -67,6 +71,7 @@ async function visualizeObject(id) {
 
     if (points.length === 0) {
         Plotly.purge(plotDiv);
+        document.getElementById('measurementText').textContent = '';
         plotWrapper.scrollIntoView({ behavior: 'smooth' });
         return;
     }
@@ -177,6 +182,87 @@ async function visualizeObject(id) {
             }
         }
     }
+
+    // ============ IZRAČUN POVRŠINE / VOLUMENA ============
+    function subVec(a, b) { return { x: a.x - b.x, y: a.y - b.y, z: (a.z ?? 0) - (b.z ?? 0) }; }
+    function cross(a, b) {
+        return {
+            x: a.y * b.z - a.z * b.y,
+            y: a.z * b.x - a.x * b.z,
+            z: a.x * b.y - a.y * b.x
+        };
+    }
+    function dot(a, b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+    function vecLength(a) { return Math.sqrt(dot(a, a)); }
+
+    // površina ravnog poligona u 2D (shoelace formula)
+    function polygonArea2D(pts) {
+        let sum = 0;
+        for (let i = 0; i < pts.length; i++) {
+            const curr = pts[i];
+            const next = pts[(i + 1) % pts.length];
+            sum += curr.x * next.y - next.x * curr.y;
+        }
+        return Math.abs(sum) / 2;
+    }
+
+    // površina ravnog poligona u 3D (zbroj poprečnih produkata - radi za bilo koju ravninu)
+    function polygonArea3D(pts) {
+        if (pts.length < 3) return 0;
+        let normalSum = { x: 0, y: 0, z: 0 };
+        const origin = pts[0];
+        for (let i = 1; i < pts.length - 1; i++) {
+            const v1 = subVec(pts[i], origin);
+            const v2 = subVec(pts[i + 1], origin);
+            const c = cross(v1, v2);
+            normalSum.x += c.x; normalSum.y += c.y; normalSum.z += c.z;
+        }
+        return vecLength(normalSum) / 2;
+    }
+
+    // volumen tetraedra (standardna formula: 1/6 * |mješoviti umnožak triju bridova|)
+    function tetrahedronVolume(pts) {
+        const v1 = subVec(pts[1], pts[0]);
+        const v2 = subVec(pts[2], pts[0]);
+        const v3 = subVec(pts[3], pts[0]);
+        return Math.abs(dot(v1, cross(v2, v3))) / 6;
+    }
+
+    // volumen prizme/paralelopipeda: površina baze * visina (okomita komponenta pomaka na normalu baze)
+    // vrijedi za bilo koju prizmu (i nagnutu) po Cavalierijevom principu
+    function prismVolume(pts) {
+        const half = pts.length / 2;
+        const base = pts.slice(0, half);
+        const translation = subVec(pts[half], pts[0]);
+
+        const v1 = subVec(base[1], base[0]);
+        const v2 = subVec(base[base.length - 1], base[0]);
+        let normal = cross(v1, v2);
+        const normalLen = vecLength(normal);
+        if (normalLen === 0) return null; // degeneriran oblik
+        normal = { x: normal.x / normalLen, y: normal.y / normalLen, z: normal.z / normalLen };
+
+        const baseArea = polygonArea3D(base);
+        const height = Math.abs(dot(translation, normal));
+        return baseArea * height;
+    }
+
+    let measurementLabel = '';
+    if (obj.dimension === 2) {
+        const area = polygonArea2D(points);
+        measurementLabel = `Surface: ${area.toFixed(2)} units²`;
+    } else if (prism || box) {
+        const vol = prismVolume(points);
+        measurementLabel = vol !== null
+            ? `Volume: ${vol.toFixed(2)} units³`
+            : 'Volume: not possible to measure (degenerated shape)';
+    } else if (tetra) {
+        const vol = tetrahedronVolume(points);
+        measurementLabel = `Volume: ${vol.toFixed(2)} units³`;
+    } else {
+        measurementLabel = 'Volume: not possible to measure (unknown shape)';
+    }
+    document.getElementById('measurementText').textContent = measurementLabel;
 
     const nodeX = points.map(p => p.x);
     const nodeY = points.map(p => p.y);
